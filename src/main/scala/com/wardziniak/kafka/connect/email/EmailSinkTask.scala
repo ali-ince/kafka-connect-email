@@ -1,62 +1,68 @@
 package com.wardziniak.kafka.connect.email
 
-import java.util
-
+import com.fasterxml.jackson.databind.json.JsonMapper
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
+import com.wardziniak.kafka.connect.email.EmailSinkTask.log
+import com.wardziniak.kafka.connect.email.EmailSinkTask.mapper
 import com.wardziniak.kafka.connect.email.model.EmailMessage
 import org.apache.commons.mail.SimpleEmail
-import org.apache.kafka.clients.consumer.OffsetAndMetadata
-import org.apache.kafka.common.TopicPartition
-import org.apache.kafka.connect.errors.ConnectException
-import org.apache.kafka.connect.sink.{SinkRecord, SinkTask}
-import org.slf4j.{Logger, LoggerFactory}
+import org.apache.kafka.connect.sink.ErrantRecordReporter
+import org.apache.kafka.connect.sink.SinkRecord
+import org.apache.kafka.connect.sink.SinkTask
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 
-import scala.collection.JavaConverters._
+import java.util
+
+import scala.jdk.CollectionConverters.IterableHasAsScala
 
 /**
   * Created by wardziniak on 29.11.2016.
   */
 class EmailSinkTask extends SinkTask {
+  private var config: EmailSinkConfig = _
+  private var reporter: Option[ErrantRecordReporter] = None
 
-  val log: Logger = LoggerFactory.getLogger(classOf[EmailSinkTask])
-
-  var hostName: String = ""
-  var smtpPort: Int = 465
-  var userName: String = ""
-  var password: String = ""
-  var fromAddress: String = ""
-
-
-  override def stop(): Unit = log.error("stop")
-
-  override def put(records: util.Collection[SinkRecord]): Unit = {
-    records.asScala.foreach(record => {
-      log.error("PUT:" + record.value().toString)
-      sendEmail(record.value().asInstanceOf[EmailMessage])
-    })
+  override def stop(): Unit = {
+    log.info("email sink task has stopped")
   }
 
-  override def flush(offsets: util.Map[TopicPartition, OffsetAndMetadata]): Unit = log.error("flush")
+  override def put(records: util.Collection[SinkRecord]): Unit = {
+    records.asScala
+      .foreach(record => {
+        try {
+          val email = mapper.convertValue(record.value(), classOf[EmailMessage])
+          sendEmail(email)
+          log.debug("sent email")
+        } catch {
+          case error: Throwable => reporter match {
+              case Some(reporter) => reporter.report(record, error)
+              case _              => log.warn("unable to send email", error)
+            }
+        }
+      })
+  }
 
   override def start(props: util.Map[String, String]): Unit = {
-    if (!MANDATORY_KEYS.forall(mandatory => props.keySet().contains(mandatory)))
-      throw new ConnectException("Not all mandatory properties are set")
-    hostName = props.get(HOST_NAME_KEY)
-    smtpPort = props.get(SMTP_PORT_KEY).toInt
-    userName = props.get(USERNAME_KEY)
-    password = props.get(PASSWORD_KEY)
-    fromAddress = props.get(FROM_ADDRESS_KEY)
-    log.debug("Sink task started")
+    config = new EmailSinkConfig(props)
+    log.info("email sink task has started")
+
+    try {
+      reporter = Option.when(context.errantRecordReporter() != null)(context.errantRecordReporter())
+    } catch {
+      case _: NoSuchMethodError    => reporter = None
+      case _: NoClassDefFoundError => reporter = None
+    }
   }
 
   override def version(): String = "0.0.1"
 
-
   private def sendEmail(emailMessage: EmailMessage): Unit = {
     val email = new SimpleEmail()
-    email.setHostName(hostName)
-    email.setSmtpPort(smtpPort)
-    email.setAuthentication(userName, password)
-    email.setFrom(fromAddress)
+    email.setHostName(config.hostname())
+    email.setSmtpPort(config.port())
+    email.setAuthentication(config.username(), config.password())
+    email.setFrom(config.fromAddress())
     email.setStartTLSEnabled(true)
     email.setSSLOnConnect(true)
     email.setSubject(emailMessage.title)
@@ -67,4 +73,9 @@ class EmailSinkTask extends SinkTask {
     email.send()
     log.info("Email sent")
   }
+}
+
+object EmailSinkTask {
+  private val log: Logger = LoggerFactory.getLogger(classOf[EmailSinkTask])
+  private val mapper: JsonMapper = JsonMapper.builder().addModule(DefaultScalaModule).build()
 }

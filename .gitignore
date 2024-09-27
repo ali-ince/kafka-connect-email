@@ -14,6 +14,7 @@ project/boot/
 *.log
 
 # sbt specific
+.bsp/
 .lib/
 dist/*
 project/plugins/project/
